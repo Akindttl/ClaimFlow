@@ -207,4 +207,59 @@
   )
 )
 
+;; Advanced claim processing with risk assessment and fraud detection
+(define-public (process-claim-with-risk-assessment 
+  (claim-id uint) 
+  (risk-score uint) 
+  (fraud-indicators (list 5 (string-ascii 50)))
+  (weather-data-hash (buff 32))
+  (damage-assessment-score uint))
+  (let (
+    (claim (unwrap! (map-get? claims { claim-id: claim-id }) ERR-CLAIM-NOT-FOUND))
+    (policy (unwrap! (map-get? policies { policy-id: (get policy-id claim) }) ERR-POLICY-NOT-FOUND))
+    (policy-balance (unwrap! (map-get? policy-balances { policy-id: (get policy-id claim) }) ERR-INSUFFICIENT-FUNDS))
+    (base-settlement (calculate-settlement-amount (get amount claim) (get coverage-amount policy)))
+    (risk-multiplier (if (<= risk-score u30) u100 (if (<= risk-score u70) u80 u60)))
+    (fraud-penalty (if (> (len fraud-indicators) u2) u20 u0))
+    (damage-multiplier (if (>= damage-assessment-score u80) u100 (if (>= damage-assessment-score u50) u75 u50)))
+    (final-settlement (/ (* (* base-settlement risk-multiplier) (- damage-multiplier fraud-penalty)) u10000))
+  )
+    ;; Comprehensive validation checks
+    (asserts! (is-eq (get status claim) "pending") ERR-CLAIM-ALREADY-PROCESSED)
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (<= risk-score u100) ERR-INVALID-AMOUNT)
+    (asserts! (<= damage-assessment-score u100) ERR-INVALID-AMOUNT)
+    (asserts! (>= (get balance policy-balance) final-settlement) ERR-INSUFFICIENT-FUNDS)
+    
+    ;; Auto-reject high-risk claims with multiple fraud indicators
+    (if (and (> risk-score u80) (> (len fraud-indicators) u3))
+      (begin
+        (map-set claims { claim-id: claim-id } (merge claim { status: "rejected" }))
+        (ok u0)
+      )
+      (begin
+        ;; Process approved claim with calculated settlement
+        (try! (as-contract (stx-transfer? final-settlement tx-sender (get claimant claim))))
+        
+        ;; Update all relevant data structures
+        (map-set policy-balances
+          { policy-id: (get policy-id claim) }
+          { balance: (- (get balance policy-balance) final-settlement) }
+        )
+        
+        (map-set claims
+          { claim-id: claim-id }
+          (merge claim { 
+            status: "paid",
+            oracle-verified: true
+          })
+        )
+        
+        (update-reserves final-settlement "subtract")
+        (ok final-settlement)
+      )
+    )
+  )
+)
+
 
